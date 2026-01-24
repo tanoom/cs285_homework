@@ -13,6 +13,8 @@ import tyro
 import wandb
 from torch.utils.data import DataLoader
 
+from tqdm import tqdm
+
 from hw1_imitation.data import (
     Normalizer,
     PushtChunkDataset,
@@ -20,7 +22,7 @@ from hw1_imitation.data import (
     load_pusht_zarr,
 )
 from hw1_imitation.model import build_policy, PolicyType
-from hw1_imitation.evaluation import Logger
+from hw1_imitation.evaluation import Logger, evaluate_policy
 
 LOGDIR_PREFIX = "exp"
 
@@ -31,7 +33,7 @@ class TrainConfig:
     data_dir: Path = Path("data")
 
     # The policy type -- either MSE or flow.
-    policy_type: PolicyType = "mse"
+    policy_type: PolicyType = "flow"
     # The number of denoising steps to use for the flow policy (has no effect for the MSE policy).
     flow_num_steps: int = 10
     # The action chunk size.
@@ -117,6 +119,7 @@ def run_training(config: TrainConfig) -> None:
         chunk_size=config.chunk_size,
         hidden_dims=config.hidden_dims,
     ).to(device)
+    model = torch.compile(model)
 
     exp_name = f"seed_{config.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if config.exp_name is not None:
@@ -128,6 +131,23 @@ def run_training(config: TrainConfig) -> None:
     logger = Logger(log_dir)
 
     ### TODO: PUT YOUR MAIN TRAINING LOOP HERE ###
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    step = 0
+    model.train()
+    for epoch in range(config.num_epochs):
+        for states, action_chunks in tqdm(loader):
+            states = states.to(device)
+            action_chunks = action_chunks.to(device)
+            loss = model.compute_loss(states, action_chunks)
+            logger.log({"train/loss": loss.item()}, step=step)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            step += 1
+            if step % config.eval_interval == 0:
+                evaluate_policy(model, normalizer, device, config.chunk_size, config.video_size, config.num_video_episodes, config.flow_num_steps, step, logger)
+        print(f"epoch: {epoch} is done")
 
     logger.dump_for_grading()
 
