@@ -9,7 +9,7 @@ wandb/
 .DS_Store
 
 # Data artifacts
-/data/
+data/
 checkpoints/
 videos/
 *.zip
