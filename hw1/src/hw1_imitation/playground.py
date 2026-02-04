@@ -7,11 +7,12 @@ This script allows you to:
 - Pause/resume execution to intervene
 
 Controls:
-- Left click + drag: Control a red pusher circle (same physics as the agent)
-- SPACE: Pause/resume (when paused, sample trajectories to see multi-modality)
-- S: Sample a new trajectory (only when paused) - shows policy's multi-modality
-- C: Clear all sampled trajectories
+- Left click + drag: Control red pusher OR drag agent (in sampling mode)
+- S: Toggle sampling mode - drag agent to see multi-modal trajectories
+- P: Toggle red pusher on/off (default: OFF)
+- C: Clear sampled trajectories
 - V: Toggle trajectory visualization during runtime
+- SPACE: Pause/resume
 - R: Reset episode
 - M: Toggle manual mode (agent stops moving)
 - T: Toggle unlimited time (ignore time limit)
@@ -120,8 +121,11 @@ class InteractivePlayground:
         
         # User pusher (second circle that you control with mouse)
         self.user_pusher = None
+        self.user_pusher_shape = None
         self.user_pusher_target = None
-        self._setup_user_pusher()
+        self.user_pusher_enabled = False  # Disabled by default
+        if self.user_pusher_enabled:
+            self._setup_user_pusher()
 
         # Stats
         self.episode_reward = 0.0
@@ -130,22 +134,12 @@ class InteractivePlayground:
         
         # Trajectory visualization
         self.show_trajectory = True  # Toggle for showing current action chunk
-        self.paused_trajectories: list[np.ndarray] = []  # Trajectories sampled while paused
         self.current_trajectory: np.ndarray | None = None  # Current action chunk trajectory
         
-        # Colors for multi-modal visualization (different colors for each sample)
-        self.trajectory_colors = [
-            (255, 0, 0),      # Red
-            (0, 255, 0),      # Green
-            (0, 0, 255),      # Blue
-            (255, 255, 0),    # Yellow
-            (255, 0, 255),    # Magenta
-            (0, 255, 255),    # Cyan
-            (255, 128, 0),    # Orange
-            (128, 0, 255),    # Purple
-            (0, 255, 128),    # Spring green
-            (255, 128, 128),  # Light red
-        ]
+        # Sampling mode (hold S to enter)
+        self.sampling_mode = False
+        self.num_sample_trajectories = 10  # Number of trajectories to sample
+        self.sampled_trajectories: list[np.ndarray] = []  # Trajectories shown in sampling mode
 
     def reset(self):
         """Reset the environment."""
@@ -159,23 +153,31 @@ class InteractivePlayground:
         self.user_pusher_target = None
         
         # Clear trajectory visualizations
-        self.paused_trajectories.clear()
+        self.sampled_trajectories.clear()
         self.current_trajectory = None
+        self.sampling_mode = False
         
-        # Re-create user pusher since physics space is reset
-        self._setup_user_pusher()
+        # Re-create user pusher since physics space is reset (only if enabled)
+        self.user_pusher = None
+        self.user_pusher_shape = None
+        if self.user_pusher_enabled:
+            self._setup_user_pusher()
         
         print("\n--- Episode Reset ---")
         print(f"Mode: {'Manual' if self.manual_mode else 'Policy'}")
         print(f"Unlimited time: {'ON' if self.unlimited_time else 'OFF'}")
 
-    def sample_action_chunk(self) -> np.ndarray | None:
+    def sample_action_chunk(self, obs: np.ndarray | None = None) -> np.ndarray | None:
         """Sample an action chunk from the policy without updating state."""
-        if self.model is None or self.obs is None:
+        if self.model is None:
+            return None
+        
+        obs = obs if obs is not None else self.obs
+        if obs is None:
             return None
             
         state = (
-            torch.from_numpy(self.normalizer.normalize_state(self.obs))
+            torch.from_numpy(self.normalizer.normalize_state(obs))
             .float()
             .to(self.device)
         )
@@ -190,6 +192,31 @@ class InteractivePlayground:
         action_chunk = self.normalizer.denormalize_action(pred_chunk)
         action_chunk = np.clip(action_chunk, self.action_low, self.action_high)
         return action_chunk
+
+    def _sample_trajectories(self):
+        """Sample multiple trajectories for visualization."""
+        self.sampled_trajectories.clear()
+        if self.model is None or self.obs is None:
+            return
+        
+        for _ in range(self.num_sample_trajectories):
+            traj = self.sample_action_chunk()
+            if traj is not None:
+                self.sampled_trajectories.append(traj)
+
+    def set_agent_position(self, pos: tuple[float, float]):
+        """Set the agent position and update observation."""
+        try:
+            base_env = self.env.unwrapped
+            # Set position and zero velocity
+            base_env.agent.position = pos
+            base_env.agent.velocity = (0, 0)
+            # Step physics briefly to apply the change
+            base_env.space.step(base_env.dt)
+            # Get fresh observation from environment
+            self.obs = base_env.get_obs()
+        except Exception as e:
+            print(f"Could not set agent position: {e}")
 
     def get_policy_action(self) -> np.ndarray:
         """Get action from the policy."""
@@ -211,6 +238,8 @@ class InteractivePlayground:
 
     def _setup_user_pusher(self):
         """Add a user-controlled pusher circle (same as agent) to the physics space."""
+        if self.user_pusher is not None:
+            return  # Already exists
         try:
             import pymunk
             base_env = self.env.unwrapped
@@ -226,10 +255,20 @@ class InteractivePlayground:
             base_env.space.add(body, shape)
             self.user_pusher = body
             self.user_pusher_shape = shape
-            print("User pusher created (red circle)")
         except Exception as e:
             print(f"Could not create user pusher: {e}")
             self.user_pusher = None
+
+    def _remove_user_pusher(self):
+        """Remove the user pusher from the physics space."""
+        try:
+            if self.user_pusher is not None and self.user_pusher_shape is not None:
+                base_env = self.env.unwrapped
+                base_env.space.remove(self.user_pusher, self.user_pusher_shape)
+                self.user_pusher = None
+                self.user_pusher_shape = None
+        except Exception as e:
+            print(f"Could not remove user pusher: {e}")
 
     def mouse_to_env_coords(self, mouse_pos: tuple[int, int]) -> tuple[float, float]:
         """Convert mouse position to environment coordinates."""
@@ -258,24 +297,56 @@ class InteractivePlayground:
         except Exception as e:
             print(f"User pusher update error: {e}")
 
-    def draw_trajectory(self, surface: pygame.Surface, trajectory: np.ndarray, color: tuple, alpha: int = 200):
-        """Draw a trajectory as connected circles with lines."""
+    def get_gradient_color(self, t: float) -> tuple:
+        """Get color for position t (0=start, 1=end) in trajectory.
+        
+        Gradient: Blue -> Cyan -> Green -> Yellow -> Orange -> Red
+        """
+        # Define color stops: (position, (R, G, B))
+        color_stops = [
+            (0.0, (0, 0, 255)),      # Blue
+            (0.2, (0, 200, 255)),    # Light blue / Cyan
+            (0.4, (0, 255, 100)),    # Green
+            (0.6, (255, 255, 0)),    # Yellow
+            (0.8, (255, 165, 0)),    # Orange
+            (1.0, (255, 0, 0)),      # Red
+        ]
+        
+        # Find the two color stops to interpolate between
+        for i in range(len(color_stops) - 1):
+            t0, c0 = color_stops[i]
+            t1, c1 = color_stops[i + 1]
+            if t0 <= t <= t1:
+                # Interpolate
+                local_t = (t - t0) / (t1 - t0)
+                r = int(c0[0] + (c1[0] - c0[0]) * local_t)
+                g = int(c0[1] + (c1[1] - c0[1]) * local_t)
+                b = int(c0[2] + (c1[2] - c0[2]) * local_t)
+                return (r, g, b)
+        
+        return color_stops[-1][1]  # Default to red
+
+    def draw_trajectory(self, surface: pygame.Surface, trajectory: np.ndarray):
+        """Draw a trajectory with gradient colors (blue->cyan->green->yellow->orange->red)."""
         if trajectory is None or len(trajectory) == 0:
             return
         
         points = [(int(p[0]), int(p[1])) for p in trajectory]
+        n = len(points)
         
-        # Draw lines connecting the points
-        if len(points) > 1:
-            pygame.draw.lines(surface, color, False, points, 2)
+        # Draw lines connecting the points with gradient colors
+        for i in range(n - 1):
+            t = i / max(1, n - 1)
+            color = self.get_gradient_color(t)
+            pygame.draw.line(surface, color, points[i], points[i + 1], 2)
         
-        # Draw circles at each waypoint
+        # Draw circles at each waypoint with gradient colors
         for i, point in enumerate(points):
-            # Larger circle at start, smaller at end
-            radius = max(3, 8 - i // 2)
+            t = i / max(1, n - 1)
+            color = self.get_gradient_color(t)
+            # Small circles (radius 2-4)
+            radius = max(2, 4 - (i * 2) // n)
             pygame.draw.circle(surface, color, point, radius)
-            # Draw a white border
-            pygame.draw.circle(surface, (255, 255, 255), point, radius, 1)
 
     def draw_all_trajectories(self):
         """Draw all trajectories on the pygame window."""
@@ -286,14 +357,13 @@ class InteractivePlayground:
             
             surface = base_env.window
             
-            # Draw paused trajectories (multi-modal samples)
-            for i, traj in enumerate(self.paused_trajectories):
-                color = self.trajectory_colors[i % len(self.trajectory_colors)]
-                self.draw_trajectory(surface, traj, color)
+            # Draw sampled trajectories (in sampling mode)
+            for traj in self.sampled_trajectories:
+                self.draw_trajectory(surface, traj)
             
-            # Draw current trajectory (white/cyan) during runtime
-            if self.show_trajectory and self.current_trajectory is not None and not self.paused:
-                self.draw_trajectory(surface, self.current_trajectory, (0, 255, 255), alpha=255)
+            # Draw current trajectory during runtime (not in sampling mode)
+            if self.show_trajectory and self.current_trajectory is not None and not self.paused and not self.sampling_mode:
+                self.draw_trajectory(surface, self.current_trajectory)
             
             pygame.display.update()
             
@@ -302,11 +372,11 @@ class InteractivePlayground:
 
     def step(self):
         """Execute one environment step."""
-        if self.done or self.paused:
+        if self.done or self.paused or self.sampling_mode:
             return
 
-        # Update user pusher target based on mouse
-        if self.mouse_pressed and self.last_mouse_pos:
+        # Update user pusher target based on mouse (only when not in sampling mode)
+        if self.mouse_pressed and self.last_mouse_pos and not self.sampling_mode:
             self.user_pusher_target = self.mouse_to_env_coords(self.last_mouse_pos)
         else:
             self.user_pusher_target = None
@@ -373,37 +443,56 @@ class InteractivePlayground:
             elif event.key == pygame.K_t:
                 self.unlimited_time = not self.unlimited_time
                 print(f"Unlimited time: {'ON' if self.unlimited_time else 'OFF'}")
+            elif event.key == pygame.K_p:
+                self.user_pusher_enabled = not self.user_pusher_enabled
+                if self.user_pusher_enabled:
+                    self._setup_user_pusher()
+                    print("Red pusher: ON")
+                else:
+                    self._remove_user_pusher()
+                    print("Red pusher: OFF")
             elif event.key == pygame.K_v:
                 self.show_trajectory = not self.show_trajectory
                 print(f"Trajectory visualization: {'ON' if self.show_trajectory else 'OFF'}")
             elif event.key == pygame.K_s:
-                if self.paused and self.model is not None:
-                    # Sample a new trajectory and add to visualization
-                    traj = self.sample_action_chunk()
-                    if traj is not None:
-                        self.paused_trajectories.append(traj)
-                        print(f"Sampled trajectory #{len(self.paused_trajectories)}")
-                elif not self.paused:
-                    print("Pause first (SPACE) to sample trajectories")
+                if self.model is not None:
+                    self.sampling_mode = not self.sampling_mode
+                    if self.sampling_mode:
+                        self._sample_trajectories()
+                        print(f"Sampling mode ON - drag agent to see {self.num_sample_trajectories} trajectories")
+                    else:
+                        self.sampled_trajectories.clear()
+                        print("Sampling mode OFF")
                 else:
                     print("No model loaded")
             elif event.key == pygame.K_c:
-                # Clear all paused trajectories
-                self.paused_trajectories.clear()
-                print("Cleared all trajectory samples")
+                # Clear sampled trajectories
+                self.sampled_trajectories.clear()
+                print("Cleared trajectory samples")
+        
 
         if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:  # Left click: control user pusher
+            if event.button == 1:  # Left click
                 self.mouse_pressed = True
                 self.last_mouse_pos = pygame.mouse.get_pos()
+                if self.sampling_mode:
+                    # In sampling mode, drag the agent
+                    pos = self.mouse_to_env_coords(self.last_mouse_pos)
+                    self.set_agent_position(pos)
+                    self._sample_trajectories()
 
         if event.type == pygame.MOUSEBUTTONUP:
             if event.button == 1:
                 self.mouse_pressed = False
 
         if event.type == pygame.MOUSEMOTION:
+            self.last_mouse_pos = pygame.mouse.get_pos()
             if self.mouse_pressed:
-                self.last_mouse_pos = pygame.mouse.get_pos()
+                if self.sampling_mode:
+                    # In sampling mode, drag the agent and resample
+                    pos = self.mouse_to_env_coords(self.last_mouse_pos)
+                    self.set_agent_position(pos)
+                    self._sample_trajectories()
 
         return True
 
@@ -416,20 +505,19 @@ class InteractivePlayground:
         print("Push-T Interactive Playground")
         print("="*50)
         print("\nControls:")
-        print("  Left click + drag: Control YOUR pusher (red circle)")
-        print("  SPACE: Pause/resume")
-        print("  S: Sample trajectory (when paused) - study multi-modality!")
+        print("  Left click + drag: Control red pusher OR drag agent (in sampling mode)")
+        print("  S: Toggle sampling mode - drag agent to see trajectories")
+        print("  P: Toggle red pusher on/off (default: OFF)")
         print("  C: Clear sampled trajectories")
         print("  V: Toggle trajectory visualization")
+        print("  SPACE: Pause/resume")
         print("  R: Reset episode")
         print("  M: Toggle manual mode (agent stops)")
         print("  T: Toggle unlimited time (default: ON)")
         print("  Q/ESC: Quit")
         print("\nMulti-modality visualization:")
-        print("  1. Press SPACE to pause")
-        print("  2. Press S multiple times to sample different trajectories")
-        print("  3. Each sample shows in a different color")
-        print("  4. Press SPACE to resume (clears samples)")
+        print("  Press S to enter sampling mode, then drag the blue agent")
+        print(f"  You'll see {self.num_sample_trajectories} sampled trajectories update in real-time!")
         print("="*50)
 
         self.reset()
