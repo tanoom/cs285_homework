@@ -42,9 +42,9 @@ class TrainConfig:
     batch_size: int = 128
     lr: float = 3e-4
     weight_decay: float = 0.0
-    hidden_dims: tuple[int, ...] = (256, 256, 256)
+    hidden_dims: tuple[int, ...] = (256, 256, 256, 256)
     # The number of epochs to train for.
-    num_epochs: int = 400
+    num_epochs: int = 800
     # How often to run evaluation, measured in training steps.
     eval_interval: int = 10_000
     num_video_episodes: int = 5

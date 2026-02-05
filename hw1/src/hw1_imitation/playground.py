@@ -199,10 +199,15 @@ class InteractivePlayground:
         if self.model is None or self.obs is None:
             return
         
+        # Get agent position to prepend to each trajectory
+        agent_pos = np.array([[self.obs[0], self.obs[1]]])
+        
         for _ in range(self.num_sample_trajectories):
             traj = self.sample_action_chunk()
             if traj is not None:
-                self.sampled_trajectories.append(traj)
+                # Prepend agent position so trajectory starts from agent
+                traj_with_start = np.vstack([agent_pos, traj])
+                self.sampled_trajectories.append(traj_with_start)
 
     def set_agent_position(self, pos: tuple[float, float]):
         """Set the agent position and update observation."""
@@ -228,9 +233,10 @@ class InteractivePlayground:
         if self.action_chunk is None or self.chunk_index >= self.chunk_size:
             self.action_chunk = self.sample_action_chunk()
             self.chunk_index = 0
-            # Update current trajectory for visualization
+            # Update current trajectory for visualization (starts from agent position)
             if self.show_trajectory:
-                self.current_trajectory = self.action_chunk.copy()
+                agent_pos = np.array([[self.obs[0], self.obs[1]]])
+                self.current_trajectory = np.vstack([agent_pos, self.action_chunk])
 
         action = self.action_chunk[self.chunk_index]
         self.chunk_index += 1
@@ -462,6 +468,9 @@ class InteractivePlayground:
                         print(f"Sampling mode ON - drag agent to see {self.num_sample_trajectories} trajectories")
                     else:
                         self.sampled_trajectories.clear()
+                        # Invalidate old action chunk so policy samples fresh from new position
+                        self.action_chunk = None
+                        self.chunk_index = self.chunk_size
                         print("Sampling mode OFF")
                 else:
                     print("No model loaded")
